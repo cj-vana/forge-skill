@@ -77,6 +77,10 @@ Create the output directory and write project description:
 
 ```bash
 mkdir -p .forge/research .forge/reviews
+
+# Capture the starting point for final review diff
+FORGE_BASE_REF=$(git rev-parse HEAD 2>/dev/null || echo "")
+echo "$FORGE_BASE_REF" > .forge/.base-ref
 ```
 
 Write `.forge/PROJECT.md`:
@@ -139,6 +143,7 @@ Agent(
 Run Codex research as a foreground Bash command (NOT background — must complete before synthesis):
 
 ```bash
+set -o pipefail
 codex exec "Research this project idea and write a comprehensive analysis. Focus on: what exists already, what tech stack is standard for this in 2025/2026, what mistakes teams commonly make, and how to architect it well.
 
 Project description:
@@ -152,12 +157,14 @@ Write your analysis covering:
 5. Questions you'd ask before building this
 
 Be specific and opinionated." 2>&1 | tee .forge/research/codex-analysis.md
+CODEX_EXIT=$?
 ```
 
-**IMPORTANT:** Verify codex-analysis.md is valid before proceeding. Check the file is non-empty and doesn't contain error output:
+**IMPORTANT:** Validate the codex output before proceeding:
 ```bash
-if [ ! -s .forge/research/codex-analysis.md ] || head -1 .forge/research/codex-analysis.md | grep -qi "error\|failed\|not found"; then
+if [ "$CODEX_EXIT" -ne 0 ] || [ ! -s .forge/research/codex-analysis.md ] || head -5 .forge/research/codex-analysis.md | grep -qi "error\|failed\|not found\|not inside a trusted"; then
   echo "CODEX_RESEARCH_FAILED"
+  rm -f .forge/research/codex-analysis.md  # Remove invalid output
 fi
 ```
 
@@ -265,6 +272,7 @@ Based on PROJECT.md (with all Q&A) and SYNTHESIS.md, write `.forge/PLAN.md`:
 Submit the plan to Codex for adversarial review:
 
 ```bash
+set -o pipefail
 codex exec "You are reviewing an implementation plan. Be adversarial — challenge assumptions, find gaps, identify risks the plan doesn't address, and suggest improvements. Be specific about what's wrong and how to fix it.
 
 $(cat .forge/PLAN.md)
@@ -316,6 +324,7 @@ After implementing, run Codex adversarial review on the changes:
 
 ```bash
 mkdir -p .forge/reviews
+set -o pipefail
 codex review --uncommitted "Focus on: bugs, security issues, performance problems, edge cases. Also check if this matches the plan step it's supposed to implement. Plan step context: [paste relevant plan step]" 2>&1 | tee .forge/reviews/codex-step-[N].md
 ```
 
@@ -352,7 +361,8 @@ Parse the reviewer's JSON return:
 If the forge-reviewer returns `CHANGES_REQUESTED`:
 1. Fix each item in `required_changes`
 2. Re-stage changes
-3. Re-run the reviewer (maximum 2 re-review cycles per step)
+3. **Re-run BOTH reviews** (Codex + Claude) — post-fix edits may have introduced new issues that Codex would catch. This maintains the dual-review guarantee.
+4. Maximum 2 full re-review cycles per step (each cycle = Codex review + Claude review)
 
 ### 8f. Commit
 
@@ -371,7 +381,13 @@ After all steps are implemented:
 1. Run a final Codex review on the entire changeset:
 
 ```bash
-codex review --base [branch-before-forge] "Full project review. Check for: integration issues between steps, missing error handling, security vulnerabilities, and anything that doesn't match the original plan." 2>&1 | tee .forge/reviews/final-codex-review.md
+FORGE_BASE=$(cat .forge/.base-ref 2>/dev/null)
+set -o pipefail
+if [ -n "$FORGE_BASE" ]; then
+  codex review --base "$FORGE_BASE" "Full project review. Check for: integration issues between steps, missing error handling, security vulnerabilities, and anything that doesn't match the original plan." 2>&1 | tee .forge/reviews/final-codex-review.md
+else
+  codex review --uncommitted "Full project review. Check for: integration issues, missing error handling, security vulnerabilities, and anything that doesn't match the original plan." 2>&1 | tee .forge/reviews/final-codex-review.md
+fi
 ```
 
 2. Address any final findings.

@@ -79,7 +79,10 @@ Create the output directory and write project description:
 mkdir -p .forge/research .forge/reviews
 
 # Capture the starting point for final review diff
-# For greenfield repos with no commits, create an empty initial commit first
+# Handle: not a git repo, repo with no commits, or normal repo
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git init
+fi
 if ! git rev-parse HEAD >/dev/null 2>&1; then
   git commit --allow-empty -m "forge: initialize repository"
 fi
@@ -395,9 +398,14 @@ else
 fi
 ```
 
-2. If the final review finds issues, address them through the **full dual-review loop** (steps 8b-8f) — the same Codex + Claude review gate used during implementation. Final review findings are not exempt from the dual-review guarantee.
+2. If the final Codex review finds issues, address them through the **full dual-review loop** (steps 8b-8f). Final review findings are not exempt from the dual-review guarantee.
 
-3. Run a final Claude sub-agent review on the complete project (same pattern as step 8d but scoped to the full changeset).
+3. Run a final Claude sub-agent review on the complete project. Save the output to `.forge/reviews/final-claude-review.json`.
+
+   If the final Claude review returns `CHANGES_REQUESTED`:
+   - Fix the required changes
+   - Re-run **both** Codex and Claude final reviews (same dual-review loop)
+   - Maximum 2 final re-review cycles — escalate to user after that
 
 4. Show the user a summary:
    - What was built

@@ -59,6 +59,30 @@ Reviews (in `.forge/reviews/`):
 - `.forge/reviews/final-codex-review.md`
 </objective>
 
+<critical_rules>
+
+## Argument Disambiguation
+
+**Arguments ALWAYS describe WHAT to build, never which forge phase to start at.**
+
+If the user runs `/forge:build phase 5` or `/forge:build step 3`, the argument is the project task description — it means "build phase 5 of my project" or "build step 3 of my project." It does NOT mean "skip to forge process phase 5."
+
+The forge process ALWAYS runs phases 1-9 sequentially. There is no skip mechanism.
+
+To resume a previous run, the user must explicitly say "resume" or "continue where we left off."
+
+## Stale Artifacts
+
+If `.forge/` already exists from a previous run, **do not assume it applies to the current task.** At the start of every fresh invocation:
+
+1. Check if `.forge/PROJECT.md` exists
+2. If it does, ask the user: "Found existing .forge/ artifacts from a previous run. Start fresh (clear .forge/) or resume the previous build?"
+3. If starting fresh, move the old directory: `mv .forge .forge.bak.$(date +%s)`
+
+Never silently reuse artifacts from a previous run.
+
+</critical_rules>
+
 <process>
 
 ## Phase 1: Intake

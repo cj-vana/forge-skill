@@ -79,7 +79,11 @@ Create the output directory and write project description:
 mkdir -p .forge/research .forge/reviews
 
 # Capture the starting point for final review diff
-FORGE_BASE_REF=$(git rev-parse HEAD 2>/dev/null || echo "")
+# For greenfield repos with no commits, create an empty initial commit first
+if ! git rev-parse HEAD >/dev/null 2>&1; then
+  git commit --allow-empty -m "forge: initialize repository"
+fi
+FORGE_BASE_REF=$(git rev-parse HEAD)
 echo "$FORGE_BASE_REF" > .forge/.base-ref
 ```
 
@@ -383,16 +387,19 @@ After all steps are implemented:
 ```bash
 FORGE_BASE=$(cat .forge/.base-ref 2>/dev/null)
 set -o pipefail
-if [ -n "$FORGE_BASE" ]; then
+if [ -n "$FORGE_BASE" ] && git cat-file -t "$FORGE_BASE" >/dev/null 2>&1; then
   codex review --base "$FORGE_BASE" "Full project review. Check for: integration issues between steps, missing error handling, security vulnerabilities, and anything that doesn't match the original plan." 2>&1 | tee .forge/reviews/final-codex-review.md
 else
-  codex review --uncommitted "Full project review. Check for: integration issues, missing error handling, security vulnerabilities, and anything that doesn't match the original plan." 2>&1 | tee .forge/reviews/final-codex-review.md
+  # Greenfield repo or missing base — review all commits on current branch
+  codex exec "Review the entire codebase for: integration issues between components, missing error handling, security vulnerabilities, and anything that doesn't match the plan in .forge/PLAN.md" 2>&1 | tee .forge/reviews/final-codex-review.md
 fi
 ```
 
-2. Address any final findings.
+2. If the final review finds issues, address them through the **full dual-review loop** (steps 8b-8f) — the same Codex + Claude review gate used during implementation. Final review findings are not exempt from the dual-review guarantee.
 
-3. Show the user a summary:
+3. Run a final Claude sub-agent review on the complete project (same pattern as step 8d but scoped to the full changeset).
+
+4. Show the user a summary:
    - What was built
    - How many steps completed
    - Key decisions made

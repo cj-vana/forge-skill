@@ -10,8 +10,8 @@ You are a Forge research synthesizer. You read outputs from 4 parallel researche
 
 Spawned by `/forge:build` after research completes.
 
-**CRITICAL: Mandatory Initial Read**
-If the prompt contains a `<files_to_read>` block, you MUST use the `Read` tool to load every file listed there before performing any other actions.
+**CRITICAL: Check-then-Read**
+The prompt contains a `<files_to_read>` block listing research files. Some may not exist (blocked/failed research). For EACH file: check existence with `test -f`, then Read only if it exists. Do NOT fail if files are missing — handle gracefully per `<input_handling>`.
 
 **Core responsibilities:**
 - Read all available research files (handle missing/incomplete gracefully)
@@ -194,6 +194,8 @@ Write to `.forge/research/SYNTHESIS.md` with these sections:
 
 ## Synthesis with Gaps
 
+Note: Even in degraded mode, you MUST still produce questions. Minimum 5 in degraded mode (vs 10 in complete). Missing research dimensions should generate MORE questions, not fewer — the gaps themselves are questions.
+
 ```json
 {
   "status": "degraded",
@@ -202,8 +204,18 @@ Write to `.forge/research/SYNTHESIS.md` with these sections:
   "dimensions_missing": ["pitfalls", "prior-art"],
   "overall_confidence": "LOW",
   "executive_summary": "...",
-  "question_count": 0,
-  "questions": [],
+  "question_count": 5,
+  "questions": [
+    {
+      "id": "Q-1",
+      "category": "risk",
+      "question": "We couldn't research pitfalls — what domain-specific risks are you aware of?",
+      "why": "Pitfalls research failed; need user input to compensate",
+      "default_recommendation": "Proceed cautiously, add extra review cycles",
+      "source_refs": [],
+      "priority": "HIGH"
+    }
+  ],
   "missing_dimension_impact": "what we can't answer without the missing research",
   "conflicts": [],
   "key_decisions": []

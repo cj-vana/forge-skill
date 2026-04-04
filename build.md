@@ -37,15 +37,26 @@ Build software through a rigorous dual-model workflow combining Claude and Codex
 
 **Output directory:** `.forge/` in the current project
 
-**Canonical file names (lowercase everywhere):**
+**Canonical file names:**
+Research dimensions are lowercase. User-facing documents are UPPERCASE. This is intentional — research files are machine-consumed, documents are human-consumed.
+
+Research (lowercase):
 - `.forge/research/stack.md`
 - `.forge/research/pitfalls.md`
 - `.forge/research/architecture.md`
 - `.forge/research/prior-art.md`
 - `.forge/research/codex-analysis.md`
+
+Documents (UPPERCASE):
 - `.forge/research/SYNTHESIS.md`
 - `.forge/PLAN.md`
 - `.forge/PROJECT.md`
+
+Reviews (in `.forge/reviews/`):
+- `.forge/reviews/codex-plan-review.md`
+- `.forge/reviews/codex-step-{N}.md`
+- `.forge/reviews/claude-step-{N}.json`
+- `.forge/reviews/final-codex-review.md`
 </objective>
 
 <process>
@@ -123,7 +134,7 @@ Agent(
 
 ### Codex Research (parallel with Claude agents)
 
-Simultaneously run Codex research in background:
+Run Codex research as a foreground Bash command (NOT background — must complete before synthesis):
 
 ```bash
 codex exec "Research this project idea and write a comprehensive analysis. Focus on: what exists already, what tech stack is standard for this in 2025/2026, what mistakes teams commonly make, and how to architect it well.
@@ -140,6 +151,19 @@ Write your analysis covering:
 
 Be specific and opinionated." 2>&1 | tee .forge/research/codex-analysis.md
 ```
+
+**IMPORTANT:** Verify codex-analysis.md is valid before proceeding. Check the file is non-empty and doesn't contain error output:
+```bash
+if [ ! -s .forge/research/codex-analysis.md ] || head -1 .forge/research/codex-analysis.md | grep -qi "error\|failed\|not found"; then
+  echo "CODEX_RESEARCH_FAILED"
+fi
+```
+
+If codex research fails, mark it as `missing` in the research status passed to the synthesizer.
+
+### Wait for ALL research to complete
+
+ALL 5 research tracks (4 Claude agents + 1 Codex) must finish before proceeding to synthesis. Do not start Phase 3 until every agent has returned and the codex command has completed.
 
 ### Parse Agent Results
 
@@ -254,7 +278,7 @@ Review the plan on these dimensions:
 5. Acceptance criteria — are they specific enough to verify?
 6. Missing steps — what did the plan forget?
 
-Be specific. Reference step numbers. Suggest exact changes." 2>&1 | tee .forge/CODEX-PLAN-REVIEW.md
+Be specific. Reference step numbers. Suggest exact changes." 2>&1 | tee .forge/reviews/codex-plan-review.md
 ```
 
 ---
@@ -299,19 +323,23 @@ Read the Codex review. Fix any issues found. If Codex identified something that 
 
 ### 8d. Claude Sub-Agent Review
 
-Stage the changes first, then spawn the reviewer with an explicit file list:
+Stage the changes first, then spawn the reviewer with an explicit file list AND the specific plan step text (not just the step number):
 
 ```bash
 git add [specific files from this step]
 ```
 
+Extract the specific plan step text from PLAN.md for the reviewer:
+
 ```
 Agent(
   subagent_type="forge-reviewer",
-  prompt="<files_to_read>\n.forge/PLAN.md\n</files_to_read>\n\n<changed_files>\n[list of files changed in this step]\n</changed_files>\n\nReview the current staged changes against the plan. This is Step [N]: [step name].\n\nCodex already reviewed and the following was addressed: [summary of codex findings].\n\nYour focus: plan alignment, code quality, completeness, patterns, integration.",
+  prompt="<files_to_read>\n.forge/PLAN.md\n</files_to_read>\n\n<plan_step>\n### Step [N]: [step name]\n**What:** [copied from PLAN.md]\n**Files:** [copied from PLAN.md]\n**Acceptance:** [copied from PLAN.md]\n**Risks:** [copied from PLAN.md]\n</plan_step>\n\n<changed_files>\n[list of files changed in this step]\n</changed_files>\n\nReview the current staged changes against the plan step above.\n\nCodex already reviewed and the following was addressed: [summary of codex findings].\n\nYour focus: plan alignment, code quality, completeness, patterns, integration.",
   description="Review step [N]"
 )
 ```
+
+**Save the reviewer output** to `.forge/reviews/claude-step-[N].json` using the Write tool after parsing the JSON return.
 
 Parse the reviewer's JSON return:
 - `"APPROVED"` — proceed to commit
@@ -363,45 +391,54 @@ codex review --base [branch-before-forge] "Full project review. Check for: integ
 
 ## Orchestration Rules
 
-1. **Never skip the dual review.** Every code change goes through Codex review AND Claude sub-agent review before commit.
-2. **Never rush questioning.** Minimum 10 questions. If research raised complex topics, ask more.
-3. **Research before opinions.** Don't form views about stack/architecture until research is done.
-4. **Codex findings are serious.** Don't dismiss Codex review findings without explanation.
-5. **Plan changes need user approval.** If Codex review causes significant plan changes, confirm with user.
-6. **Small commits.** Each plan step = one commit. Don't bundle multiple steps.
-7. **Track everything.** All reviews go to `.forge/reviews/`. All research to `.forge/research/`.
-8. **Parse JSON returns.** Agent returns are JSON — parse the `status`/`verdict` field to determine next action.
-9. **Handle degraded states.** If research is incomplete or blocked, proceed with warnings rather than failing entirely.
-10. **Stage before review.** Always `git add` specific files before running the forge-reviewer, so it has a clear diff to review.
+1. **Never rush questioning.** Minimum 10 questions (5 in degraded mode). If research raised complex topics, ask more.
+2. **Research before opinions.** Don't form views about stack/architecture until research is done.
+3. **Codex findings are serious.** Don't dismiss Codex review findings without explanation.
+4. **Plan changes need user approval.** If Codex review causes significant plan changes, confirm with user.
+5. **Small commits.** Each plan step = one commit. Don't bundle multiple steps.
+6. **Track everything.** All reviews saved to `.forge/reviews/`. All research to `.forge/research/`.
+7. **Parse JSON returns.** Agent returns are JSON — parse the `status`/`verdict` field to determine next action.
+8. **Handle degraded states.** If research is incomplete or blocked, proceed with warnings rather than failing entirely.
+9. **Stage before review.** Always `git add` specific files before running the forge-reviewer, so it has a clear diff to review.
+10. **Save all review artifacts.** Codex reviews → `.forge/reviews/codex-step-{N}.md`. Claude reviewer JSON → `.forge/reviews/claude-step-{N}.json`.
+
+## Review Gate Policy (precedence order)
+
+The review gate has a clear precedence hierarchy:
+
+1. **Default: Dual review required.** Both Codex + Claude sub-agent must review before commit.
+2. **Codex unavailable:** Fall back to Claude-only review. Warn the user: "Codex unavailable — proceeding with single-model review. This reduces coverage." Log the degraded state.
+3. **User explicitly requests skip:** Allow it. Warn: "Skipping review for step [N]. Risk accepted by user." Record in the commit message: `forge: step [N] — [name] (review skipped by user request)`.
+
+The user can always override, but the system defaults to maximum review coverage.
 
 ## File Structure
 
 ```
 .forge/
-  PROJECT.md                # Project description + Q&A
-  PLAN.md                   # Implementation plan
-  CODEX-PLAN-REVIEW.md      # Codex's review of the plan
+  PROJECT.md                 # Project description + Q&A
+  PLAN.md                    # Implementation plan
   research/
-    stack.md                # Tech stack research
-    pitfalls.md             # Pitfalls research
-    architecture.md         # Architecture research
-    prior-art.md            # Prior art research
-    codex-analysis.md       # Codex's parallel research
-    SYNTHESIS.md            # Combined synthesis
+    stack.md                 # Tech stack research
+    pitfalls.md              # Pitfalls research
+    architecture.md          # Architecture research
+    prior-art.md             # Prior art research
+    codex-analysis.md        # Codex's parallel research
+    SYNTHESIS.md             # Combined synthesis
   reviews/
-    codex-step-1.md         # Codex review per step
-    codex-step-2.md
-    claude-step-1.md        # Claude reviewer output per step
-    final-codex-review.md   # Final full review
+    codex-plan-review.md     # Codex's review of the plan
+    codex-step-1.md          # Codex review per step
+    claude-step-1.json       # Claude reviewer JSON output per step
+    final-codex-review.md    # Final full review
 ```
 
 ## Error Recovery
 
 - If a researcher agent returns `"blocked"`, re-run just that one
-- If Codex is unavailable, note it and continue with Claude-only review (but warn the user)
+- If Codex is unavailable, follow Review Gate Policy precedence (rule 2)
 - If synthesizer returns `"insufficient"`, re-run failed researchers before trying again
 - If a review cycle finds fundamental issues, update the plan and re-confirm with user before continuing
-- If the user wants to skip a review, let them but note the risk
+- If the user wants to skip a review, follow Review Gate Policy precedence (rule 3)
 - Maximum 2 re-review cycles per implementation step — if still failing, ask the user
 
 </rules>

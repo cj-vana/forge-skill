@@ -104,6 +104,8 @@ Run 5 research tracks in parallel — 4 Claude agents + 1 Codex research.
 
 ### Claude Research (4 parallel agents)
 
+**WARNING: Do NOT use `isolation: "worktree"` for parallel agents.** Concurrent worktree spawns race on `~/.claude/` credential files causing ~50% auth failures. Use default isolation (shared repo).
+
 Spawn ALL 4 `forge-researcher` agents simultaneously in a single message:
 
 ```
@@ -440,5 +442,38 @@ The user can always override, but the system defaults to maximum review coverage
 - If a review cycle finds fundamental issues, update the plan and re-confirm with user before continuing
 - If the user wants to skip a review, follow Review Gate Policy precedence (rule 3)
 - Maximum 2 re-review cycles per implementation step — if still failing, ask the user
+
+## Codex CLI Reliability
+
+Codex `exec` has known issues in headless mode. Follow these practices:
+
+**Retry with backoff:** Codex has a 60-second default timeout that causes silent failures. If a codex command fails or returns empty:
+```bash
+# Retry pattern for codex commands
+for attempt in 1 2 3; do
+  result=$(codex exec "..." 2>&1) && break
+  sleep $((attempt * 5))
+done
+```
+
+**Validate output:** Check that codex output is non-empty and doesn't contain error markers before consuming it.
+
+**Keep prompts concise:** Codex auto-compaction is broken in `exec` mode (openai/codex#16033). Long context accumulates until crash. Use `--ephemeral` for stateless tasks. For reviews, pass only the relevant diff/file content, not the entire project.
+
+## Agent JSON Return Validation
+
+LLM JSON output fails non-deterministically at different character positions across retries. Do NOT rely on simple retry logic.
+
+**When parsing agent returns:**
+1. Extract the fenced `json` block from the agent's output
+2. Attempt `JSON.parse` / manual parsing
+3. If parse fails, look for the key routing fields (`status`, `verdict`) via regex as fallback
+4. If both fail, treat as `"blocked"` / `"CHANGES_REQUESTED"` (fail-safe, not fail-open)
+
+**Never trust retry alone** — the same agent with the same prompt can produce differently-malformed JSON each time.
+
+## Parallel Agent Safety
+
+**Never use `isolation: "worktree"`** for forge research agents. Concurrent worktree spawns race on `~/.claude/` credential files causing ~50% auth failures (anthropics/claude-code#37324). Use default isolation.
 
 </rules>

@@ -175,31 +175,35 @@ Run Codex research as a foreground Bash command (NOT background — must complet
 
 ```bash
 set -o pipefail
-codex exec "Research this project idea and write a comprehensive analysis. Focus on: what exists already, what tech stack is standard for this in 2025/2026, what mistakes teams commonly make, and how to architect it well.
+codex exec --full-auto "Read .forge/PROJECT.md. Then write a comprehensive research analysis to stdout. Do NOT search the web — analyze based on your training knowledge.
 
-Project description:
-$(cat .forge/PROJECT.md)
+Cover these sections with specific, opinionated recommendations:
+1. EXISTING SOLUTIONS — what open-source and commercial products exist in this space
+2. RECOMMENDED STACK — specific libraries with versions, and what to avoid
+3. ARCHITECTURE — how to structure the system, component boundaries, data flow
+4. PITFALLS — domain-specific mistakes and how to prevent them
+5. QUESTIONS — what you would ask before building this
 
-Write your analysis covering:
-1. Existing solutions and prior art
-2. Recommended tech stack with versions
-3. Architecture patterns
-4. Common pitfalls and how to avoid them
-5. Questions you'd ask before building this
-
-Be specific and opinionated." 2>&1 | tee .forge/research/codex-analysis.md
+Output ONLY your analysis text. No tool call logs, no search results, just the analysis." 2>&1 | tee .forge/research/codex-analysis.raw
 CODEX_EXIT=$?
 ```
 
-**IMPORTANT:** Validate the codex output before proceeding:
+**IMPORTANT:** Codex `exec` often produces log noise (`web search:`, `exec\n`, tool call traces) mixed with real content. Strip logs and validate:
+
 ```bash
-if [ "$CODEX_EXIT" -ne 0 ] || [ ! -s .forge/research/codex-analysis.md ] || head -5 .forge/research/codex-analysis.md | grep -qi "error\|failed\|not found\|not inside a trusted"; then
-  echo "CODEX_RESEARCH_FAILED"
-  rm -f .forge/research/codex-analysis.md  # Remove invalid output
+# Strip codex log noise — keep only substantive lines
+grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh)' .forge/research/codex-analysis.raw > .forge/research/codex-analysis.md 2>/dev/null
+
+# Validate: must have real content (>10 substantive lines), not just logs
+REAL_LINES=$(wc -l < .forge/research/codex-analysis.md 2>/dev/null || echo 0)
+if [ "$CODEX_EXIT" -ne 0 ] || [ "$REAL_LINES" -lt 10 ]; then
+  echo "CODEX_RESEARCH_FAILED — got $REAL_LINES lines of content"
+  rm -f .forge/research/codex-analysis.md
 fi
+rm -f .forge/research/codex-analysis.raw
 ```
 
-If codex research fails, mark it as `missing` in the research status passed to the synthesizer.
+If codex research fails or produces only logs, mark it as `missing` in the research status passed to the synthesizer.
 
 ### Wait for ALL research to complete
 
@@ -302,16 +306,14 @@ Based on PROJECT.md (with all Q&A) and SYNTHESIS.md, write `.forge/PLAN.md`:
 
 Submit the plan to Codex for adversarial review:
 
+Write the plan and synthesis content to a temporary review prompt file, then pass it to codex:
+
 ```bash
 set -o pipefail
-codex exec "You are reviewing an implementation plan. Be adversarial — challenge assumptions, find gaps, identify risks the plan doesn't address, and suggest improvements. Be specific about what's wrong and how to fix it.
+cat > /tmp/forge-plan-review-prompt.md << 'PROMPT_END'
+You are reviewing an implementation plan. Be adversarial — challenge assumptions, find gaps, identify risks the plan doesn't address, and suggest improvements.
 
-$(cat .forge/PLAN.md)
-
-Context from research:
-$(cat .forge/research/SYNTHESIS.md)
-
-Review the plan on these dimensions:
+Review dimensions:
 1. Completeness — does it cover everything needed?
 2. Ordering — are steps in the right sequence?
 3. Risk coverage — are researched pitfalls addressed?
@@ -319,7 +321,11 @@ Review the plan on these dimensions:
 5. Acceptance criteria — are they specific enough to verify?
 6. Missing steps — what did the plan forget?
 
-Be specific. Reference step numbers. Suggest exact changes." 2>&1 | tee .forge/reviews/codex-plan-review.md
+Be specific. Reference step numbers. Suggest exact changes. Output ONLY your review findings as structured text — no tool call logs.
+PROMPT_END
+
+codex exec --full-auto "Read .forge/PLAN.md and .forge/research/SYNTHESIS.md. Then read /tmp/forge-plan-review-prompt.md for your review instructions. Output your review to stdout." 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh)' | tee .forge/reviews/codex-plan-review.md
+rm -f /tmp/forge-plan-review-prompt.md
 ```
 
 ---
@@ -351,12 +357,18 @@ Implement the step. Write code using Write/Edit tools. Follow the plan's specifi
 
 ### 8b. Codex Review
 
-After implementing, run Codex adversarial review on the changes:
+After implementing, run Codex adversarial review on the changes. **Do NOT use `codex review --uncommitted "prompt"` — it doesn't accept a prompt argument.** Use `codex exec` with the diff piped in instead:
 
 ```bash
 mkdir -p .forge/reviews
 set -o pipefail
-codex review --uncommitted "Focus on: bugs, security issues, performance problems, edge cases. Also check if this matches the plan step it's supposed to implement. Plan step context: [paste relevant plan step]" 2>&1 | tee .forge/reviews/codex-step-[N].md
+git diff > /tmp/forge-step-diff.patch
+codex exec --full-auto "Review this code diff for: bugs, security issues, performance problems, edge cases. Also check if it matches this plan step:
+
+[paste relevant plan step text here]
+
+The diff is in /tmp/forge-step-diff.patch — read it and provide your review. Output ONLY structured review findings, no tool call logs." 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh)' | tee .forge/reviews/codex-step-[N].md
+rm -f /tmp/forge-step-diff.patch
 ```
 
 ### 8c. Address Codex Findings
@@ -397,9 +409,36 @@ If the forge-reviewer returns `CHANGES_REQUESTED`:
 
 ### 8f. Commit
 
+Before committing, run any project formatters/linters to avoid pre-commit hook failures:
+
+```bash
+# Detect and run formatters before committing (avoids hook churn)
+# Check for common formatter configs and run them on staged files
+if [ -f .prettierrc ] || [ -f .prettierrc.json ] || [ -f prettier.config.js ]; then
+  npx prettier --write $(git diff --cached --name-only) 2>/dev/null || true
+fi
+if [ -f .eslintrc ] || [ -f .eslintrc.json ] || [ -f eslint.config.js ]; then
+  npx eslint --fix $(git diff --cached --name-only) 2>/dev/null || true
+fi
+if [ -f pyproject.toml ] && grep -q "ruff\|black" pyproject.toml 2>/dev/null; then
+  ruff format $(git diff --cached --name-only) 2>/dev/null || black $(git diff --cached --name-only) 2>/dev/null || true
+fi
+# Re-stage after formatting
+git add $(git diff --cached --name-only)
+```
+
+Then commit:
+
 ```bash
 git commit -m "forge: step [N] — [step name]"
 ```
+
+**If the commit fails due to pre-commit hooks:**
+1. Read the hook error output
+2. Fix the issue (usually formatting or lint)
+3. Re-stage the files: `git add [files]`
+4. Retry the commit (do NOT use `--no-verify`)
+5. If the hook fails again with different issues, fix those too (max 3 attempts)
 
 ### Repeat for each plan step.
 
@@ -415,10 +454,11 @@ After all steps are implemented:
 FORGE_BASE=$(cat .forge/.base-ref 2>/dev/null)
 set -o pipefail
 if [ -n "$FORGE_BASE" ] && git cat-file -t "$FORGE_BASE" >/dev/null 2>&1; then
-  codex review --base "$FORGE_BASE" "Full project review. Check for: integration issues between steps, missing error handling, security vulnerabilities, and anything that doesn't match the original plan." 2>&1 | tee .forge/reviews/final-codex-review.md
+  git diff "$FORGE_BASE"..HEAD > /tmp/forge-final-diff.patch
+  codex exec --full-auto "Read /tmp/forge-final-diff.patch and .forge/PLAN.md. Review the full changeset for: integration issues between steps, missing error handling, security vulnerabilities, and anything that doesn't match the plan. Output ONLY your review findings." 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh)' | tee .forge/reviews/final-codex-review.md
+  rm -f /tmp/forge-final-diff.patch
 else
-  # Greenfield repo or missing base — review all commits on current branch
-  codex exec "Review the entire codebase for: integration issues between components, missing error handling, security vulnerabilities, and anything that doesn't match the plan in .forge/PLAN.md" 2>&1 | tee .forge/reviews/final-codex-review.md
+  codex exec --full-auto "Review the entire codebase and .forge/PLAN.md for: integration issues between components, missing error handling, security vulnerabilities, and anything that doesn't match the plan. Output ONLY your review findings." 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh)' | tee .forge/reviews/final-codex-review.md
 fi
 ```
 
@@ -502,18 +542,26 @@ The user can always override, but the system defaults to maximum review coverage
 
 Codex `exec` has known issues in headless mode. Follow these practices:
 
+**Always use `codex exec --full-auto`, never `codex review` with custom prompts.** The `codex review --uncommitted "prompt"` syntax is invalid — codex review doesn't accept a trailing prompt argument. Instead, use `codex exec --full-auto` with the diff saved to a file and explicit review instructions.
+
+**Strip log noise from output.** Codex exec frequently produces `web search:`, `exec`, `succeeded`, `tokens used` log lines mixed with real content. Always pipe through:
+```bash
+grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh)' output.raw > output.clean
+```
+
+**Validate content, not just exit code.** Even with exit code 0, codex may produce only log noise. Check that the cleaned output has >10 substantive lines before treating it as valid.
+
+**Never use `run_in_background: true` for codex commands.** Codex commands go to background unpredictably when invoked from Claude Code Bash. This breaks the "all research must complete before synthesis" requirement. Always run codex as foreground commands and wait for completion before proceeding.
+
 **Retry with backoff:** Codex has a 60-second default timeout that causes silent failures. If a codex command fails or returns empty:
 ```bash
-# Retry pattern for codex commands
 for attempt in 1 2 3; do
-  result=$(codex exec "..." 2>&1) && break
+  result=$(codex exec --full-auto "..." 2>&1) && break
   sleep $((attempt * 5))
 done
 ```
 
-**Validate output:** Check that codex output is non-empty and doesn't contain error markers before consuming it.
-
-**Keep prompts concise:** Codex auto-compaction is broken in `exec` mode (openai/codex#16033). Long context accumulates until crash. Use `--ephemeral` for stateless tasks. For reviews, pass only the relevant diff/file content, not the entire project.
+**Keep prompts concise:** Codex auto-compaction is broken in `exec` mode (openai/codex#16033). Long context accumulates until crash. Use `--full-auto` instead of `--ephemeral`. For reviews, save the diff to a temp file and tell codex to read it, rather than inlining the diff in the prompt.
 
 ## Agent JSON Return Validation
 

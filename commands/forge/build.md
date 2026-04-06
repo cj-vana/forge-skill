@@ -97,6 +97,16 @@ Then ask 2-3 immediate clarifying questions to understand the basics:
 - What's the target platform/environment?
 - Any hard constraints (language, framework, etc.)?
 
+**CRITICAL: Detect deliverable type.** Ask the user (or infer from description):
+
+Use AskUserQuestion:
+- "What kind of deliverable is this?" with options:
+  - **Code project** — Software with source files, tests, builds (default forge flow)
+  - **Document** — Markdown, PRD, spec, brand guide, research report
+  - **Hybrid** — Code with significant documentation deliverables
+
+Save the answer to `.forge/PROJECT.md` as `Deliverable type: code|document|hybrid`. This determines how Phase 8 (Implementation Loop) operates — see the deliverable_modes section.
+
 Create the output directory and write project description:
 
 ```bash
@@ -184,15 +194,15 @@ Cover these sections with specific, opinionated recommendations:
 4. PITFALLS — domain-specific mistakes and how to prevent them
 5. QUESTIONS — what you would ask before building this
 
-Output ONLY your analysis text. No tool call logs, no search results, just the analysis." 2>&1 | tee .forge/research/codex-analysis.raw
+Output ONLY your analysis text. No tool call logs, no search results, just the analysis." </dev/null 2>&1 | tee .forge/research/codex-analysis.raw
 CODEX_EXIT=$?
 ```
 
-**IMPORTANT:** Codex `exec` often produces log noise (`web search:`, `exec\n`, tool call traces) mixed with real content. Strip logs and validate:
+**IMPORTANT:** Codex `exec` often produces log noise (`web search:`, `exec\n`, tool call traces, file echoes, session preambles) mixed with real content. Field reports show 130KB log files with only 2KB of actual content. Strip aggressively:
 
 ```bash
 # Strip codex log noise — keep only substantive lines
-grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh)' .forge/research/codex-analysis.raw > .forge/research/codex-analysis.md 2>/dev/null
+grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh|Reading additional input|thinking|reasoning|workdir:|model:|provider:|approval:|sandbox:|^\[20|^\[Session|^\[Tool|user instructions|<files_to_read>)' .forge/research/codex-analysis.raw > .forge/research/codex-analysis.md 2>/dev/null
 
 # Validate: must have real content (>10 substantive lines), not just logs
 REAL_LINES=$(wc -l < .forge/research/codex-analysis.md 2>/dev/null || echo 0)
@@ -324,7 +334,7 @@ Review dimensions:
 Be specific. Reference step numbers. Suggest exact changes. Output ONLY your review findings as structured text — no tool call logs.
 PROMPT_END
 
-codex exec --full-auto "Read .forge/PLAN.md and .forge/research/SYNTHESIS.md. Then read /tmp/forge-plan-review-prompt.md for your review instructions. Output your review to stdout." 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh)' | tee .forge/reviews/codex-plan-review.md
+codex exec --full-auto "Read .forge/PLAN.md and .forge/research/SYNTHESIS.md. Then read /tmp/forge-plan-review-prompt.md for your review instructions. Output your review to stdout." </dev/null 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh|Reading additional input|thinking|reasoning|workdir:|model:|provider:|approval:|sandbox:|^\[20|^\[Session|^\[Tool|user instructions|<files_to_read>)' | tee .forge/reviews/codex-plan-review.md
 rm -f /tmp/forge-plan-review-prompt.md
 ```
 
@@ -349,29 +359,67 @@ Use AskUserQuestion:
 
 ## Phase 8: Implementation Loop
 
-For each step in the plan:
+**Branches based on deliverable type from Phase 1.** Read `.forge/PROJECT.md` for the `Deliverable type` field.
 
-### 8a. Implement
+### Deliverable Mode: code (default)
+
+For code projects, each step = a unit of code change. Loop:
+
+### 8a. Implement (code mode)
 
 Implement the step. Write code using Write/Edit tools. Follow the plan's specifications for this step.
 
-### 8b. Codex Review
+### 8b. Codex Review (code mode)
 
-After implementing, run Codex adversarial review on the changes. **Do NOT use `codex review --uncommitted "prompt"` — it doesn't accept a prompt argument.** Use `codex exec` with the diff piped in instead:
+After implementing, run Codex adversarial review on the changes. **Do NOT use `codex review --uncommitted "prompt"` — it doesn't accept a prompt argument.** Use `codex exec` with the diff saved to a file:
 
 ```bash
 mkdir -p .forge/reviews
 set -o pipefail
 git diff > /tmp/forge-step-diff.patch
-codex exec --full-auto "Review this code diff for: bugs, security issues, performance problems, edge cases. Also check if it matches this plan step:
+codex exec --full-auto "Review the diff in /tmp/forge-step-diff.patch for: bugs, security issues, performance problems, edge cases. Also check if it matches this plan step:
 
 [paste relevant plan step text here]
 
-The diff is in /tmp/forge-step-diff.patch — read it and provide your review. Output ONLY structured review findings, no tool call logs." 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh)' | tee .forge/reviews/codex-step-[N].md
+Output ONLY structured review findings, no tool call logs." </dev/null 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh|Reading additional input|thinking|reasoning|workdir:|model:|provider:|approval:|sandbox:|^\[20|^\[Session|^\[Tool|user instructions|<files_to_read>)' | tee .forge/reviews/codex-step-[N].md
 rm -f /tmp/forge-step-diff.patch
 ```
 
-### 8c. Address Codex Findings
+### Deliverable Mode: document
+
+For document projects (PRD, spec, brand guide, research report), each step = one section of the document. The loop is much simpler — there's no diff per step, no per-step commit, no formatter run. The workflow is:
+
+### 8a. Write/edit (document mode)
+
+Use Write/Edit to draft the section specified by the plan step.
+
+### 8b. Section consistency check (document mode)
+
+After each section, run a quick consistency check against earlier sections to catch contradictions:
+
+```bash
+codex exec --full-auto "Read the document at [path]. Check if section [N] (just written) contradicts anything in earlier sections. Output ONLY contradictions found, or 'NONE' if consistent." </dev/null 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh|Reading additional input|thinking|reasoning|workdir:|model:|provider:|approval:|sandbox:|^\[|^$)' | tee .forge/reviews/codex-section-[N].md
+```
+
+### 8c. Continue to next section
+
+No commit per section — the document is one artifact. Move to the next plan step.
+
+### Final document review (document mode)
+
+After ALL sections are written, run a single full-document dual review (codex + claude reviewer) instead of per-step reviews. This is where contradictions across the whole document get caught — and based on field experience, this is where Codex earns its keep on document projects.
+
+```bash
+codex exec --full-auto "Read [document path]. Find every internal contradiction (numbers, dates, decisions stated differently in different sections). List each contradiction with section references. Be exhaustive." </dev/null 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh|Reading additional input|thinking|reasoning|workdir:|model:|provider:|approval:|sandbox:|^\[|^$)' | tee .forge/reviews/codex-document-review.md
+```
+
+Then spawn `forge-reviewer` for the holistic check. Fix all contradictions found. Re-run both reviews until clean (max 2 cycles).
+
+### Deliverable Mode: hybrid
+
+Use code mode for source files, document mode for documentation deliverables. Decide per plan step which mode applies based on what the step produces.
+
+### 8c. Address Codex Findings (code mode)
 
 Read the Codex review. Fix any issues found. If Codex identified something that requires a plan change, note it.
 
@@ -455,10 +503,10 @@ FORGE_BASE=$(cat .forge/.base-ref 2>/dev/null)
 set -o pipefail
 if [ -n "$FORGE_BASE" ] && git cat-file -t "$FORGE_BASE" >/dev/null 2>&1; then
   git diff "$FORGE_BASE"..HEAD > /tmp/forge-final-diff.patch
-  codex exec --full-auto "Read /tmp/forge-final-diff.patch and .forge/PLAN.md. Review the full changeset for: integration issues between steps, missing error handling, security vulnerabilities, and anything that doesn't match the plan. Output ONLY your review findings." 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh)' | tee .forge/reviews/final-codex-review.md
+  codex exec --full-auto "Read /tmp/forge-final-diff.patch and .forge/PLAN.md. Review the full changeset for: integration issues between steps, missing error handling, security vulnerabilities, and anything that doesn't match the plan. Output ONLY your review findings." </dev/null 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh|Reading additional input|thinking|reasoning|workdir:|model:|provider:|approval:|sandbox:|^\[20|^\[Session|^\[Tool|user instructions|<files_to_read>)' | tee .forge/reviews/final-codex-review.md
   rm -f /tmp/forge-final-diff.patch
 else
-  codex exec --full-auto "Review the entire codebase and .forge/PLAN.md for: integration issues between components, missing error handling, security vulnerabilities, and anything that doesn't match the plan. Output ONLY your review findings." 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh)' | tee .forge/reviews/final-codex-review.md
+  codex exec --full-auto "Review the entire codebase and .forge/PLAN.md for: integration issues between components, missing error handling, security vulnerabilities, and anything that doesn't match the plan. Output ONLY your review findings." </dev/null 2>&1 | grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh|Reading additional input|thinking|reasoning|workdir:|model:|provider:|approval:|sandbox:|^\[20|^\[Session|^\[Tool|user instructions|<files_to_read>)' | tee .forge/reviews/final-codex-review.md
 fi
 ```
 
@@ -544,14 +592,16 @@ Codex `exec` has known issues in headless mode. Follow these practices:
 
 **Always use `codex exec --full-auto`, never `codex review` with custom prompts.** The `codex review --uncommitted "prompt"` syntax is invalid — codex review doesn't accept a trailing prompt argument. Instead, use `codex exec --full-auto` with the diff saved to a file and explicit review instructions.
 
-**Strip log noise from output.** Codex exec frequently produces `web search:`, `exec`, `succeeded`, `tokens used` log lines mixed with real content. Always pipe through:
+**ALWAYS pipe `</dev/null` to codex commands.** Codex `exec` hangs waiting for stdin if no input is piped in. Field reports show first attempts hang indefinitely with only "Reading additional input from stdin..." captured. Every codex invocation must include `</dev/null` to close stdin explicitly.
+
+**Strip log noise aggressively.** Codex exec produces 130KB log files with only ~2KB of actual content (tool call traces, file echoes, session preambles, thinking blocks). Always pipe through the extended filter:
 ```bash
-grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh)' output.raw > output.clean
+grep -v -E '^(web search:|exec$|  succeeded|  failed|tokens used|/bin/zsh|Reading additional input|thinking|reasoning|workdir:|model:|provider:|approval:|sandbox:|^\[20|^\[Session|^\[Tool|user instructions|<files_to_read>)'
 ```
 
-**Validate content, not just exit code.** Even with exit code 0, codex may produce only log noise. Check that the cleaned output has >10 substantive lines before treating it as valid.
+**Validate content, not just exit code.** Even with exit code 0, codex may produce only log noise (or as little as 39 bytes of "Reading additional input..."). Check that the cleaned output has >10 substantive lines before treating it as valid. Mark as `missing` and proceed in degraded mode if validation fails.
 
-**Never use `run_in_background: true` for codex commands.** Codex commands go to background unpredictably when invoked from Claude Code Bash. This breaks the "all research must complete before synthesis" requirement. Always run codex as foreground commands and wait for completion before proceeding.
+**Never use `run_in_background: true` for codex commands.** Codex commands sometimes go to background unpredictably even without the flag set, requiring manual polling. This breaks the "all research must complete before synthesis" requirement. Always run codex as foreground Bash commands. If a codex command does end up backgrounded, wait for it to complete by reading the output file before proceeding.
 
 **Retry with backoff:** Codex has a 60-second default timeout that causes silent failures. If a codex command fails or returns empty:
 ```bash
